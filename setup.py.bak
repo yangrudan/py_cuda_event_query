@@ -1,0 +1,17 @@
+from setuptools import setup
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+
+setup(
+    name='async_timer',
+    ext_modules=[
+        CUDAExtension(
+            name='async_timer',
+            sources=['async_timer.cpp'],
+            extra_compile_args={
+                'cxx': ['-O3', '-std=c++17'],  # 启用C++17支持线程
+                'nvcc': ['-O3', '-std=c++17']
+            }
+        )
+    ],
+    cmdclass={'build_ext': BuildExtension}
+)

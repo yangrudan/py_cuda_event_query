@@ -1,0 +1,153 @@
+#include <torch/script.h>
+#include <cuda.h>
+#include <cuda_runtime.h>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <condition_variable>
+#include <cstdint>
+
+// 异步计时器类：核心逻辑不变，仅调整接口类型
+class AsyncTimer {
+private:
+    cudaEvent_t start_event;
+    cudaEvent_t end_event;
+    std::thread query_thread;
+    std::atomic<bool> running;      // 线程运行标志（原子类型）
+    std::atomic<bool> completed;    // 计时完成标志（原子类型）
+    double elapsed_ms;              // 耗时（毫秒，用double兼容TorchScript）
+    mutable std::mutex mtx;         // mutable允许const函数修改
+    std::condition_variable cv;
+
+    // 非阻塞查询CUDA事件状态的线程函数
+    void query_loop() {
+        std::unique_lock<std::mutex> lock(mtx);
+        while (running) {
+            // 每100微秒查询一次，平衡响应速度和CPU占用
+            if (cv.wait_for(lock, std::chrono::microseconds(100)) == std::cv_status::timeout) {
+                if (!completed) {
+                    // 释放锁调用CUDA API，避免锁持有时间过长
+                    lock.unlock();
+                    cudaError_t status = cudaEventQuery(end_event);
+                    lock.lock();
+
+                    if (status == cudaSuccess) {
+                        // 计算耗时（cudaEventElapsedTime返回float，转换为double）
+                        float temp_ms = 0.0f;
+                        cudaEventElapsedTime(&temp_ms, start_event, end_event);
+                        elapsed_ms = static_cast<double>(temp_ms);
+                        completed = true;
+                    } else if (status != cudaErrorNotReady) {
+                        // 标记错误（-1.0表示CUDA错误）
+                        elapsed_ms = -1.0;
+                        completed = true;
+                    }
+                }
+            }
+        }
+    }
+
+public:
+    AsyncTimer() : running(false), completed(false), elapsed_ms(0.0) {
+        // 创建CUDA事件（默认配置，启用计时）
+        cudaEventCreate(&start_event);
+        cudaEventCreate(&end_event);
+    }
+
+    ~AsyncTimer() {
+        stop();  // 确保线程停止
+        cudaEventDestroy(start_event);
+        cudaEventDestroy(end_event);
+    }
+
+    // 开始计时（非阻塞）
+    void start() {
+        std::lock_guard<std::mutex> lock(mtx);
+        completed = false;
+        elapsed_ms = 0.0;
+        cudaEventRecord(start_event, 0);  // 记录开始事件到GPU流0
+
+        // 启动查询线程（仅首次调用时启动）
+        if (!running) {
+            running = true;
+            query_thread = std::thread(&AsyncTimer::query_loop, this);
+            query_thread.detach();  // 分离线程，避免析构时未join
+        }
+    }
+
+    // 结束计时（非阻塞）
+    void end() {
+        cudaEventRecord(end_event, 0);  // 记录结束事件到GPU流0
+    }
+
+    // 检查计时是否完成（非阻塞，原子操作）
+    bool is_completed() const {
+        return completed;
+    }
+
+    // 获取耗时（线程安全，返回double兼容TorchScript）
+    double get_elapsed() const {
+        std::lock_guard<std::mutex> lock(mtx);
+        return elapsed_ms;
+    }
+
+    // 停止查询线程（供析构调用）
+    void stop() {
+        running = false;
+        cv.notify_one();  // 唤醒线程退出循环
+        if (query_thread.joinable()) {
+            query_thread.join();
+        }
+    }
+};
+
+// -------------------------- 对外接口（适配TorchScript类型要求） --------------------------
+// 1. 创建计时器：返回计时器指针的整数标识（int64_t兼容Python整数）
+int64_t create_timer() {
+    AsyncTimer* timer = new AsyncTimer();
+    return reinterpret_cast<int64_t>(timer);
+}
+
+// 2. 开始计时：接收计时器标识（int64_t）
+void start_timer(int64_t timer_id) {
+    AsyncTimer* timer = reinterpret_cast<AsyncTimer*>(timer_id);
+    if (timer) timer->start();
+}
+
+// 3. 结束计时：接收计时器标识
+void end_timer(int64_t timer_id) {
+    AsyncTimer* timer = reinterpret_cast<AsyncTimer*>(timer_id);
+    if (timer) timer->end();
+}
+
+// 4. 检查计时是否完成：返回bool（兼容Python布尔值）
+bool is_timer_completed(int64_t timer_id) {
+    AsyncTimer* timer = reinterpret_cast<AsyncTimer*>(timer_id);
+    return (timer) ? timer->is_completed() : true;
+}
+
+// 5. 获取耗时：返回double（解决TorchScript不支持float返回值的问题）
+double get_timer_elapsed(int64_t timer_id) {
+    AsyncTimer* timer = reinterpret_cast<AsyncTimer*>(timer_id);
+    return (timer) ? timer->get_elapsed() : -1.0;
+}
+
+// 6. 销毁计时器：释放内存
+void destroy_timer(int64_t timer_id) {
+    AsyncTimer* timer = reinterpret_cast<AsyncTimer*>(timer_id);
+    if (timer) {
+        timer->stop();
+        delete timer;
+    }
+}
+
+// -------------------------- 绑定到Python（TorchScript兼容版） --------------------------
+TORCH_LIBRARY(async_timer, m) {
+    // 注册所有接口，明确类型以避免schema推断错误
+    m.def("create", &create_timer);
+    m.def("start", &start_timer);
+    m.def("end", &end_timer);
+    m.def("is_completed", &is_timer_completed);
+    m.def("get_elapsed", &get_timer_elapsed);
+    m.def("destroy", &destroy_timer);
+}
