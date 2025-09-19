@@ -8,7 +8,6 @@
 
 namespace py = pybind11;
 
-// 异步计时器类（逻辑完全不变，确保线程安全）
 class AsyncTimer {
 private:
     cudaEvent_t start_event;
@@ -55,11 +54,17 @@ public:
         cudaEventDestroy(end_event);
     }
 
+    // 无参版本（默认流）
     void start() {
+        start(cudaStreamPerThread);  // 使用线程默认流
+    }
+
+    // 带流参数版本（接受cudaStream_t）
+    void start(cudaStream_t stream) {
         std::lock_guard<std::mutex> lock(mtx);
         completed = false;
         elapsed_ms = 0.0;
-        cudaEventRecord(start_event, 0);
+        cudaEventRecord(start_event, stream);
 
         if (!running) {
             running = true;
@@ -68,8 +73,14 @@ public:
         }
     }
 
+    // 无参版本（默认流）
     void end() {
-        cudaEventRecord(end_event, 0);
+        end(cudaStreamPerThread);  // 使用线程默认流
+    }
+
+    // 带流参数版本（接受cudaStream_t）
+    void end(cudaStream_t stream) {
+        cudaEventRecord(end_event, stream);
     }
 
     bool is_completed() const {
@@ -90,13 +101,26 @@ public:
     }
 };
 
-// -------------------------- PyBind11绑定（生成Python模块入口） --------------------------
 PYBIND11_MODULE(async_timer, m) {
-    m.doc() = "异步CUDA计时器（纯PyBind11实现，不依赖PyTorch PYBIND11Extension）";
+    m.doc() = "异步CUDA计时器（纯PyBind11实现，不依赖PyTorch）";
     py::class_<AsyncTimer>(m, "AsyncTimer")
         .def(py::init<>(), "创建计时器实例")
-        .def("start", &AsyncTimer::start, "开始计时（记录GPU事件）")
-        .def("end", &AsyncTimer::end, "结束计时（记录GPU事件）")
+        // 绑定无参版本start（默认流）
+        .def("start", py::overload_cast<>(&AsyncTimer::start), "开始计时（使用默认CUDA流）")
+        // 绑定带流参数的start（通过整数指针传递）
+        .def("start", 
+             [](AsyncTimer &timer, uint64_t stream_ptr) {
+                 timer.start(reinterpret_cast<cudaStream_t>(stream_ptr));
+             }, 
+             py::arg("stream_ptr"), "开始计时（通过指针指定CUDA流）")
+        // 绑定无参版本end（默认流）
+        .def("end", py::overload_cast<>(&AsyncTimer::end), "结束计时（使用默认CUDA流）")
+        // 绑定带流参数的end（通过整数指针传递）
+        .def("end", 
+             [](AsyncTimer &timer, uint64_t stream_ptr) {
+                 timer.end(reinterpret_cast<cudaStream_t>(stream_ptr));
+             }, 
+             py::arg("stream_ptr"), "结束计时（通过指针指定CUDA流）")
         .def("is_completed", &AsyncTimer::is_completed, "检查计时是否完成")
         .def("get_elapsed", &AsyncTimer::get_elapsed, "获取耗时（毫秒）")
         .def("stop", &AsyncTimer::stop, "停止计时器线程");

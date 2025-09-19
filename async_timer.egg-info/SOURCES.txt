@@ -1,3 +1,4 @@
+README.md
 async_timer.cpp
 setup.py
 async_timer.egg-info/PKG-INFO

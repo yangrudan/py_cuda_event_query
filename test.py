@@ -27,7 +27,11 @@ def main():
         print(f"Rank {rank} [异步模式] all_reduce结果: {gradient.cpu().numpy()}")
 
 
-    dist.barrier(device_ids=[device.index])  # 指定设备，消除警告
+    #dist.barrier(device_ids=[device.index])  # 指定设备，消除警告
+    # 获取当前CUDA流（NCCL通信默认使用当前流）
+    current_stream = torch.cuda.current_stream(device)
+    # 将流指针转换为整数传递给C++
+    stream_ptr = current_stream.cuda_stream
 
     timer = AsyncTimer()  # 实例化计时器
     gradient = torch.tensor([rank, rank, rank], dtype=torch.float32, device=device)
@@ -35,19 +39,19 @@ def main():
     if rank == 2:
         print(f"\nRank {rank} 开始休眠15秒（模拟节点延迟）...")
         time.sleep(15)  # CPU休眠，不阻塞GPU计时器
-    timer.start()  # 1. 记录开始事件（GPU时间戳）
+    timer.start(stream_ptr)  # 1. 记录开始事件（GPU时间戳）
 
     # 3. 启动模拟异常通信（同步/异步，不等待完成）
     if args.sync_mode:
         # 同步模式：all_reduce会阻塞直到完成，启动后立即记录结束事件
         dist.all_reduce(gradient, op=dist.ReduceOp.SUM)
-        timer.end()  # 3. 记录结束事件（GPU时间戳）
+        timer.end(stream_ptr)  # 3. 记录结束事件（GPU时间戳）
     else:
         # 异步模式：启动all_reduce后立即返回work对象，不阻塞
         work = dist.all_reduce(gradient, op=dist.ReduceOp.SUM, async_op=True)
         # 异步等待通信完成（仅为了确保梯度计算完成，不影响计时）
         work.wait()
-        timer.end()  # 3. 记录结束事件（GPU时间戳）
+        timer.end(stream_ptr)  # 3. 记录结束事件（GPU时间戳）
 
     # 4. 等待计时器完成（C++线程异步查询CUDA事件）
     print(f"Rank {rank} 等待计时器结果...")
