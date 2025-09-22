@@ -29,14 +29,14 @@ def main():
 
     #dist.barrier(device_ids=[device.index])  # 指定设备，消除警告
     # 获取当前CUDA流（NCCL通信默认使用当前流）
-    current_stream = torch.cuda.current_stream(device)
+    current_stream = torch.cuda.current_stream(torch.cuda.current_device())
     # 将流指针转换为整数传递给C++
     stream_ptr = current_stream.cuda_stream
 
     timer = AsyncTimer()  # 实例化计时器
     gradient = torch.tensor([rank, rank, rank], dtype=torch.float32, device=device)
 
-    if rank == 2:
+    if rank == 1:
         print(f"\nRank {rank} 开始休眠15秒（模拟节点延迟）...")
         time.sleep(15)  # CPU休眠，不阻塞GPU计时器
     timer.start(stream_ptr)  # 1. 记录开始事件（GPU时间戳）
