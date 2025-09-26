@@ -64,6 +64,7 @@ def main(index):
     else:
         if abs(elapsed - 3000) > 200:
             print(f" \n!!!RANK {rank} in index {index} - 总耗时: {elapsed:.4f}ms")
+            return
     if rank == 0:
         print(f"=======current index is {index}=======")
     # print(f" \n!!!RANK {rank} - 总耗时: {elapsed:.4f}ms")
